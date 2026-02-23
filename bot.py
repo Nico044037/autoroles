@@ -1,107 +1,118 @@
+import os
 import discord
 from discord.ext import commands
-import os
-import json
+
+# ===== TOKEN (RAILWAY VARIABLE MUST BE: TOKEN) =====
+TOKEN = os.getenv("TOKEN")
+
+if not TOKEN:
+    raise RuntimeError("TOKEN environment variable is not set!")
 
 intents = discord.Intents.default()
-intents.members = True
 intents.message_content = True
+intents.members = True
 intents.reactions = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-CONFIG_FILE = "config.json"
-
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        return {}
-    with open(CONFIG_FILE, "r") as f:
-        return json.load(f)
-
-def save_config(data):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-config = load_config()
+# In-memory config (simple & fast)
+autorole_config = {}
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-@bot.command()
+# ================= AUTOROLE COMMAND =================
+@bot.command(name="autorole")
 @commands.has_permissions(administrator=True)
-async def autorode(ctx, channel: discord.TextChannel, *roles: discord.Role):
+async def autorole(ctx, channel: discord.TextChannel, *roles: discord.Role):
     if not roles:
-        await ctx.send("You must provide at least one role.")
+        await ctx.send("❌ You must provide at least one role.")
         return
 
-    roles = roles[:5]  # max 5 roles
+    roles = roles[:5]  # Max 5 roles
+    guild = ctx.guild
 
-    # Lock channel (no chatting for @everyone)
-    overwrite = channel.overwrites_for(ctx.guild.default_role)
+    # Lock the channel for everyone (no chatting)
+    overwrite = channel.overwrites_for(guild.default_role)
     overwrite.send_messages = False
-    await channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+    await channel.set_permissions(guild.default_role, overwrite=overwrite)
 
-    # Create reaction message
-    role_list = "\n".join([f"React to get {role.mention}" for role in roles])
-    msg = await channel.send(
-        f"React below to unlock the server and get roles:\n\n{role_list}"
+    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+    description = "\n".join(
+        [f"{emojis[i]} → {roles[i].mention}" for i in range(len(roles))]
     )
 
-    # Add reactions (1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣)
-    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    embed = discord.Embed(
+        title="🔒 Verification Required",
+        description=f"React below to get roles and unlock chat:\n\n{description}",
+        color=discord.Color.blurple()
+    )
+
+    msg = await channel.send(embed=embed)
+
     for i in range(len(roles)):
         await msg.add_reaction(emojis[i])
 
     # Save config
-    config[str(ctx.guild.id)] = {
+    autorole_config[guild.id] = {
         "channel_id": channel.id,
         "message_id": msg.id,
         "role_ids": [role.id for role in roles]
     }
-    save_config(config)
 
-    await ctx.send(f"Autorode reaction system set in {channel.mention}!")
+    await ctx.send(f"✅ Autorole panel created in {channel.mention}")
 
+# ================= REACTION ROLE SYSTEM =================
 @bot.event
-async def on_raw_reaction_add(payload):
-    if payload.user_id == bot.user.id:
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None or payload.user_id == bot.user.id:
         return
 
-    guild_id = str(payload.guild_id)
-    if guild_id not in config:
+    config = autorole_config.get(payload.guild_id)
+    if not config:
         return
 
-    data = config[guild_id]
-
-    if payload.message_id != data["message_id"]:
+    if payload.message_id != config["message_id"]:
         return
 
     guild = bot.get_guild(payload.guild_id)
-    member = guild.get_member(payload.user_id)
+    if not guild:
+        return
 
+    member = guild.get_member(payload.user_id)
     if not member:
         return
 
-    channel = guild.get_channel(data["channel_id"])
-    roles = [guild.get_role(rid) for rid in data["role_ids"]]
+    channel = guild.get_channel(config["channel_id"])
+    role_ids = config["role_ids"]
 
     emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    emoji_str = str(payload.emoji)
 
-    if str(payload.emoji) in emojis:
-        index = emojis.index(str(payload.emoji))
-        if index < len(roles):
-            role = roles[index]
-            if role and role not in member.roles:
-                try:
-                    await member.add_roles(role, reason="Reaction autorole")
+    if emoji_str not in emojis:
+        return
 
-                    # Unlock chatting for this member
-                    overwrite = channel.overwrites_for(member)
-                    overwrite.send_messages = True
-                    await channel.set_permissions(member, overwrite=overwrite)
+    index = emojis.index(emoji_str)
 
-                except discord.Forbidden:
-                    pass
+    if index >= len(role_ids):
+        return
 
-bot.run(os.getenv("TOKEN"))
+    role = guild.get_role(role_ids[index])
+    if not role:
+        return
+
+    if role not in member.roles:
+        try:
+            await member.add_roles(role, reason="Reaction autorole verification")
+
+            # Unlock chat for this specific user
+            overwrite = channel.overwrites_for(member)
+            overwrite.send_messages = True
+            await channel.set_permissions(member, overwrite=overwrite)
+
+        except discord.Forbidden:
+            print("Missing permissions (Manage Roles / Manage Channels)")
+
+bot.run(TOKEN)
